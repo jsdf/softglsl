@@ -1,0 +1,24 @@
+{
+  "name": "fluffygl",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "generate-parser": "peggy -o lib/parser.ts --format es src/parser.peggy  --plugin $(node -e 'process.stdout.write(require.resolve(\"ts-pegjs\"))')",
+    "test-parse": "tsx src/run.ts",
+    "import-glast": "cp -a ../glsl-lsp/glast/pkg/ ./lib/glast && ls -lah ./lib/glast"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2",
+    "vite": "^6.0.1"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "peggy": "^3.0.2",
+    "ts-pegjs": "^4.2.1",
+    "tsx": "^4.19.2"
+  }
+}
