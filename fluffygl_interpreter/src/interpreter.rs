@@ -9,7 +9,7 @@ use macaw::{IVec2, IVec3, Mat3, Mat4, Vec2, Vec2Swizzles, Vec3, Vec3Swizzles, Ve
 use core::panic;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use crate::builtins;
+use crate::builtins::{self, BuiltinFn, BuiltinFns};
 
 use crate::log;
 
@@ -46,6 +46,8 @@ pub enum Value {
     SamplerCube(Texture2D),
     Nothing,
 }
+
+#[derive(Clone, Debug)]
 pub enum ControlFlow {
     Next,                  // continue to the next statement
     Return(Option<Value>), // Return from the current function
@@ -191,6 +193,11 @@ pub struct Function {
     pub body: Vec<Node>,
 }
 
+pub enum Callable<'a> {
+    Function(Function),
+    BuiltinFn(&'a BuiltinFn),
+}
+
 // the top level environment of an execution context.
 #[derive(Clone, Debug)]
 pub struct Env {
@@ -199,6 +206,7 @@ pub struct Env {
     out_vars: Vec<IOVar>,
     uniforms: Vec<IOVar>,
     functions: HashMap<String, Function>,
+    builtin_functions: BuiltinFns,
 }
 
 impl Env {
@@ -208,6 +216,7 @@ impl Env {
             out_vars: Vec::new(),
             uniforms: Vec::new(),
             functions: HashMap::new(),
+            builtin_functions: BuiltinFns::new(),
         }
     }
 }
@@ -244,30 +253,46 @@ impl EnvHandle {
         });
     }
 
-    pub fn get_function(&self, name: &String) -> Option<Function> {
-        self.with(|env| env.functions.get(name).cloned())
-    }
-
     pub fn call_function(
         &self,
         name: &String,
         args: Vec<Value>,
         parent_scope: &ScopeHandle,
     ) -> ControlFlow {
-        let function = self.get_function(name).expect(&format!(
-            "Tried to call function {}, no function defined with that name",
-            name
-        ));
-        let function_scope = ScopeHandle::new(Scope::new(Some(parent_scope.clone())));
+        // first, check builtins, as user defined functions cannot replace builtins in GLSL
 
-        for (param, arg) in function.params.iter().zip(args) {
-            function_scope.set_var(param.name.clone(), arg);
+        let builtin_call_result = self.with(|env| {
+            match env.builtin_functions.get(name) {
+                Some(builtin_fn) => {
+                    // call the builtin function
+                    return Some(((*builtin_fn).func)(&args));
+                }
+                None => None,
+            }
+        });
+
+        if let Some(result) = builtin_call_result {
+            return ControlFlow::Return(Some(result));
         }
 
-        match eval_statements(self, &function_scope, &function.body) {
-            ControlFlow::Return(value) => ControlFlow::Return(value),
-            _ => panic!("Function did not return a valid ControlFlow"),
-        }
+        // otherwise, try to call a user defined function
+        self.with(|env| {
+            let function = env.functions.get(name).expect(&format!(
+                "Tried to call function {}, no function defined with that name",
+                name
+            ));
+            let function_scope = ScopeHandle::new(Scope::new(Some(parent_scope.clone())));
+
+            for (param, arg) in function.params.iter().zip(args) {
+                function_scope.set_var(param.name.clone(), arg);
+            }
+
+            match eval_statements(self, &function_scope, &function.body) {
+                ControlFlow::Return(value) => ControlFlow::Return(value),
+                ControlFlow::Next => ControlFlow::Return(None),
+                cf => panic!("Function did not return a valid ControlFlow, got {:?}", cf),
+            }
+        })
     }
 }
 
@@ -281,7 +306,7 @@ fn assignment(scope: &ScopeHandle, left: &Expr, right_value: Value) -> Value {
 }
 
 pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Value {
-    log!("eval_expression {:#?}", expr);
+    log!("eval_expression {:?}", expr);
     match &expr.ty {
         ExprTy::Lit(literal) => match literal {
             Lit::Bool(b) => Value::Bool(*b),
@@ -384,7 +409,7 @@ pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Val
         }
 
         ExprTy::ObjAccess { obj, leaf } => {
-            log!("Object access {:#?} {:#?}", obj, leaf);
+            log!("property access {:#?} {:#?}", obj, leaf);
             let obj_value = eval_expression(env, scope, obj);
             let leaf_expr = leaf.as_ref().unwrap();
             let leaf_unboxed = leaf_expr.as_ref();
@@ -393,159 +418,24 @@ pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Val
             let leaf_value = match &leaf_unboxed.ty {
                 ExprTy::Ident(ident) => {
                     // interpret based on what is being accessed upon
-                    // TODO: implement swizzled access for vectors
                     match obj_value {
-                        Value::Vec2(vec2) => match ident.name.as_str() {
-                            "x" => Value::Float(vec2.x),
-                            "y" => Value::Float(vec2.y),
-                            "xx" => Value::Vec2(vec2.xx()),
-                            "xy" => Value::Vec2(vec2.xy()),
-                            "yx" => Value::Vec2(vec2.yx()),
-                            "yy" => Value::Vec2(vec2.yy()),
-                            _ => {
-                                // parse swizzles/rg naming
-                                let swizzle = ident.name.as_str();
-                                let mut swizzled = Vec2::ZERO;
-
-                                // check that this is a valid swizzle by checking that each character is valid
-                                let mut is_swizzle = true;
-                                for c in swizzle.chars() {
-                                    match c {
-                                        'x' | 'y' | 'r' | 'g' => {}
-                                        _ => {
-                                            is_swizzle = false;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if is_swizzle {
-                                    for (i, c) in swizzle.chars().enumerate() {
-                                        match c {
-                                            'x' => swizzled[i] = vec2.x,
-                                            'y' => swizzled[i] = vec2.y,
-                                            'r' => swizzled[i] = vec2.x,
-                                            'g' => swizzled[i] = vec2.y,
-                                            _ => panic!("Invalid swizzle character '{}'", c),
-                                        }
-                                    }
-                                    Value::Vec2(swizzled)
-                                } else {
-                                    panic!("Invalid property access on Vec2: '{}'", ident.name);
-                                }
-                            }
-                        },
-                        Value::Vec3(vec3) => match ident.name.as_str() {
-                            "x" => Value::Float(vec3.x),
-                            "y" => Value::Float(vec3.y),
-                            "z" => Value::Float(vec3.z),
-                            // optimize the most common swizzles for now
-                            "xy" => Value::Vec2(vec3.xy()),
-                            "yz" => Value::Vec2(vec3.yz()),
-                            "xz" => Value::Vec2(vec3.xz()),
-                            "xx" => Value::Vec2(vec3.xx()),
-                            "yy" => Value::Vec2(vec3.yy()),
-                            "zz" => Value::Vec2(vec3.zz()),
-                            "xyz" => Value::Vec3(vec3),
-                            "rgb" => Value::Vec3(vec3),
-
-                            _ => {
-                                // parse swizzles
-                                let swizzle = ident.name.as_str();
-                                let mut swizzled = Vec3::ZERO;
-
-                                // check that this is a valid swizzle by checking that each character is valid
-                                let mut is_swizzle = true;
-                                for c in swizzle.chars() {
-                                    match c {
-                                        'x' | 'y' | 'z' | 'r' | 'g' | 'b' => {}
-                                        _ => {
-                                            is_swizzle = false;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if is_swizzle {
-                                    for (i, c) in swizzle.chars().enumerate() {
-                                        match c {
-                                            'x' => swizzled[i] = vec3.x,
-                                            'y' => swizzled[i] = vec3.y,
-                                            'z' => swizzled[i] = vec3.z,
-                                            'r' => swizzled[i] = vec3.x,
-                                            'g' => swizzled[i] = vec3.y,
-                                            'b' => swizzled[i] = vec3.z,
-                                            _ => panic!("Invalid swizzle character '{}'", c),
-                                        }
-                                    }
-                                    Value::Vec3(swizzled)
-                                } else {
-                                    panic!("Invalid property access on Vec3: '{}'", ident.name);
-                                }
-                            }
-                        },
-                        Value::Vec4(vec4) => {
-                            match ident.name.as_str() {
-                                "x" => Value::Float(vec4.x),
-                                "y" => Value::Float(vec4.y),
-                                "z" => Value::Float(vec4.z),
-                                "w" => Value::Float(vec4.w),
-                                "xy" => Value::Vec2(vec4.xy()),
-                                "xyz" => Value::Vec3(vec4.xyz()),
-                                "rgb" => Value::Vec3(vec4.xyz()),
-                                "rgba" => Value::Vec4(vec4),
-                                _ => {
-                                    // parse swizzles
-                                    let swizzle = ident.name.as_str();
-                                    let mut swizzled = Vec4::ZERO;
-
-                                    // check that this is a valid swizzle by checking that each character is valid
-                                    let mut is_swizzle = true;
-                                    for c in swizzle.chars() {
-                                        match c {
-                                            'x' | 'y' | 'z' | 'w' | 'r' | 'g' | 'b' | 'a' => {}
-                                            _ => {
-                                                is_swizzle = false;
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    if is_swizzle {
-                                        for (i, c) in swizzle.chars().enumerate() {
-                                            match c {
-                                                'x' => swizzled[i] = vec4.x,
-                                                'y' => swizzled[i] = vec4.y,
-                                                'z' => swizzled[i] = vec4.z,
-                                                'w' => swizzled[i] = vec4.w,
-                                                'r' => swizzled[i] = vec4.x,
-                                                'g' => swizzled[i] = vec4.y,
-                                                'b' => swizzled[i] = vec4.z,
-                                                'a' => swizzled[i] = vec4.w,
-                                                _ => panic!("Invalid swizzle character '{}'", c),
-                                            }
-                                        }
-                                        Value::Vec4(swizzled)
-                                    } else {
-                                        panic!("Invalid property access on Vec4: '{}'", ident.name);
-                                    }
-                                }
-                            }
+                        Value::Vec2(_) | Value::Vec3(_) | Value::Vec4(_) => {
+                            builtins::vec_property_access(obj_value, ident.name.as_str())
                         }
                         Value::Mat3(mat3) => {
-                            panic!("Object access not implemented for Mat3")
+                            panic!("Property access not implemented for Mat3")
                         }
                         Value::Mat4(mat4) => {
-                            panic!("Object access not implemented for Mat4")
+                            panic!("Property access not implemented for Mat4")
                         }
                         _ => {
-                            panic!("Object access not implemented for {:?}", obj_value)
+                            todo!("Property access not implemented for {:?}", obj_value)
                         }
                     }
                 }
                 _ => {
                     todo!(
-                        "Object access leaf expression type not implemented: {:#?}",
+                        "Property access leaf expression type not implemented: {:#?}",
                         leaf_unboxed
                     )
                 }
@@ -779,33 +669,26 @@ pub fn eval_ast(ast: &[Node], input_vars: HashMap<String, Value>) -> HashMap<Str
     let env = EnvHandle::new(Env::new());
     let root_scope = ScopeHandle::new(Scope::new_with_vars(None, input_vars));
 
-    // filter top level statements. in particular, any top level expression which is of Ident type is
-    // probably a keyword which the parser didn't recognise, so we should ignore it.
-
-    // log!("eval_ast");
+    // evaluate the AST to populate the environment and root scope
     eval_statements(&env, &root_scope, ast);
 
     // call the main function
-    let main_function = env.get_function(&"main".to_string()).unwrap();
-    let main_scope = ScopeHandle::new(Scope::new(Some(root_scope.clone())));
-    eval_statements(&env, &main_scope, &main_function.body);
-
-    let mut output_vars: HashMap<String, Value> = HashMap::new();
+    env.call_function(&"main".to_string(), vec![], &root_scope);
 
     // copy the output variables from the root scope to the output_vars
-
+    let mut output_vars: HashMap<String, Value> = HashMap::new();
     let output_var_names: Vec<String> = env.with(|env| {
         env.out_vars
             .iter()
             .map(|out_var| out_var.name.clone())
             .collect()
     });
-
     for name in output_var_names {
         // log!("Getting output variable {}", name);
         let value = root_scope.get_var(&name).unwrap().clone();
         output_vars.insert(name, value);
     }
 
+    // return the output variables
     output_vars
 }

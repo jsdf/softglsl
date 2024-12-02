@@ -3,7 +3,191 @@ use std::collections::HashMap;
 use crate::interpreter::Value;
 
 use glam::{BVec2, BVec3, BVec4};
-use macaw::{Mat2, Mat3, Mat4, Vec2, Vec3, Vec4};
+use macaw::{Mat2, Mat3, Mat4, Vec2, Vec2Swizzles, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+
+// implements arbitrary swizzling of vectors. to reduce the amount of code required,
+// for now i'm just implementing Vec4 swizzling, so the other types will need to be
+// converted to Vec4 before being passed to this function. this function also doesn't
+// validate the combination of swizzle characters, so it's possible to create invalid
+// swizzles which combine the xyzw and rgba component names.
+pub fn swizzle_vec4(input: Vec4, swizzle: &str) -> Value {
+    let swizzle_size = swizzle.len();
+    match swizzle_size {
+        1 => {
+            // single component swizzle
+            let c = swizzle.chars().nth(0).unwrap();
+            let swizzled = match c {
+                'x' => input.x,
+                'y' => input.y,
+                'r' => input.x,
+                'g' => input.y,
+                _ => panic!("Invalid swizzle character '{}'", c),
+            };
+            Value::Float(swizzled)
+        }
+        2 => {
+            let mut swizzled = Vec2::ZERO;
+
+            for (i, c) in swizzle.chars().enumerate() {
+                match c {
+                    'x' => swizzled[i] = input.x,
+                    'y' => swizzled[i] = input.y,
+                    'r' => swizzled[i] = input.x,
+                    'g' => swizzled[i] = input.y,
+                    _ => panic!("Invalid swizzle character '{}'", c),
+                }
+            }
+            Value::Vec2(swizzled)
+        }
+        3 => {
+            let mut swizzled = Vec3::ZERO;
+
+            for (i, c) in swizzle.chars().enumerate() {
+                match c {
+                    'x' => swizzled[i] = input.x,
+                    'y' => swizzled[i] = input.y,
+                    'z' => swizzled[i] = input.z,
+                    'r' => swizzled[i] = input.x,
+                    'g' => swizzled[i] = input.y,
+                    'b' => swizzled[i] = input.z,
+                    _ => panic!("Invalid swizzle character '{}'", c),
+                }
+            }
+            Value::Vec3(swizzled)
+        }
+        4 => {
+            let mut swizzled = Vec4::ZERO;
+
+            for (i, c) in swizzle.chars().enumerate() {
+                match c {
+                    'x' => swizzled[i] = input.x,
+                    'y' => swizzled[i] = input.y,
+                    'z' => swizzled[i] = input.z,
+                    'w' => swizzled[i] = input.w,
+                    'r' => swizzled[i] = input.x,
+                    'g' => swizzled[i] = input.y,
+                    'b' => swizzled[i] = input.z,
+                    'a' => swizzled[i] = input.w,
+                    _ => panic!("Invalid swizzle character '{}'", c),
+                }
+            }
+            Value::Vec4(swizzled)
+        }
+        _ => panic!("Invalid swizzle size {}", swizzle_size),
+    }
+}
+
+pub fn vec_property_access(input: Value, property: &str) -> Value {
+    match input {
+        Value::Vec2(vec2) => match property {
+            "x" => Value::Float(vec2.x),
+            "y" => Value::Float(vec2.y),
+            "xx" => Value::Vec2(vec2.xx()),
+            "xy" => Value::Vec2(vec2.xy()),
+            "yx" => Value::Vec2(vec2.yx()),
+            "yy" => Value::Vec2(vec2.yy()),
+            _ => {
+                // parse swizzles
+                let swizzle = property;
+
+                // check that this is a swizzle by checking that each character is a component
+                let mut is_swizzle = true;
+                for c in swizzle.chars() {
+                    match c {
+                        'x' | 'y' | 'r' | 'g' => {}
+                        _ => {
+                            is_swizzle = false;
+                            break;
+                        }
+                    }
+                }
+
+                if is_swizzle {
+                    swizzle_vec4(Vec4::from((vec2, 0.0, 0.0)), swizzle)
+                } else {
+                    panic!("Invalid property access on Vec2: '{}'", property);
+                }
+            }
+        },
+        Value::Vec3(vec3) => match property {
+            "x" => Value::Float(vec3.x),
+            "y" => Value::Float(vec3.y),
+            "z" => Value::Float(vec3.z),
+            "r" => Value::Float(vec3.x),
+            "g" => Value::Float(vec3.y),
+            "b" => Value::Float(vec3.z),
+            "xy" => Value::Vec2(vec3.xy()),
+            "yz" => Value::Vec2(vec3.yz()),
+            "xz" => Value::Vec2(vec3.xz()),
+            "xx" => Value::Vec2(vec3.xx()),
+            "yy" => Value::Vec2(vec3.yy()),
+            "zz" => Value::Vec2(vec3.zz()),
+            "xyz" => Value::Vec3(vec3),
+            "rgb" => Value::Vec3(vec3),
+            _ => {
+                // parse swizzles
+                let swizzle = property;
+
+                // check that this is a swizzle by checking that each character is a component
+                let mut is_swizzle = true;
+                for c in swizzle.chars() {
+                    match c {
+                        'x' | 'y' | 'z' | 'r' | 'g' | 'b' => {}
+                        _ => {
+                            is_swizzle = false;
+                            break;
+                        }
+                    }
+                }
+
+                if is_swizzle {
+                    swizzle_vec4(Vec4::from((vec3, 0.0)), swizzle)
+                } else {
+                    panic!("Invalid property access on Vec3: '{}'", property);
+                }
+            }
+        },
+        Value::Vec4(vec4) => {
+            match property {
+                "x" => Value::Float(vec4.x),
+                "y" => Value::Float(vec4.y),
+                "z" => Value::Float(vec4.z),
+                "w" => Value::Float(vec4.w),
+                "r" => Value::Float(vec4.x),
+                "g" => Value::Float(vec4.y),
+                "b" => Value::Float(vec4.z),
+                "a" => Value::Float(vec4.w),
+                "xy" => Value::Vec2(vec4.xy()),
+                "xyz" => Value::Vec3(vec4.xyz()),
+                "rgb" => Value::Vec3(vec4.xyz()),
+                "rgba" => Value::Vec4(vec4),
+                _ => {
+                    // parse swizzles
+                    let swizzle = property;
+
+                    // check that this is a swizzle by checking that each character is a component
+                    let mut is_swizzle = true;
+                    for c in swizzle.chars() {
+                        match c {
+                            'x' | 'y' | 'z' | 'w' | 'r' | 'g' | 'b' | 'a' => {}
+                            _ => {
+                                is_swizzle = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if is_swizzle {
+                        swizzle_vec4(vec4, swizzle)
+                    } else {
+                        panic!("Invalid property access on Vec4: '{}'", property);
+                    }
+                }
+            }
+        }
+        _ => panic!("Expected a Vec type"),
+    }
+}
 
 fn mat3_broadcast_scalar(scalar: f32) -> Mat3 {
     Mat3::from_cols_array(&[
@@ -241,28 +425,27 @@ fn refract_vec4(i: Vec4, n: Vec4, eta: f32) -> Vec4 {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BuiltinFn {
     pub name: &'static str,
     pub args: &'static [&'static str],
     pub func: fn(&[Value]) -> Value,
 }
 
+#[derive(Clone, Debug)]
 pub struct BuiltinFns {
     pub fns: HashMap<&'static str, BuiltinFn>,
 }
 
-fn value_as_float(value: &Value) -> f32 {
-    match value {
-        Value::Float(f) => *f,
-        _ => panic!("Expected float"),
-    }
-}
-
-// see https://registry.khronos.org/OpenGL/specs/es/3.0/GLSL_ES_Specification_3.00.pdf
-// section 8.3
 impl BuiltinFns {
+    pub fn get(&self, name: &str) -> Option<&BuiltinFn> {
+        self.fns.get(name)
+    }
     pub fn new() -> Self {
         let mut fns = HashMap::new();
+
+        // see https://registry.khronos.org/OpenGL/specs/es/3.0/GLSL_ES_Specification_3.00.pdf
+        // section 8.3
 
         // Vector constructors
 
@@ -363,7 +546,7 @@ impl BuiltinFns {
                         }
                         // vec4
                         [Value::Vec4(v)] => Value::Vec4(*v),
-                        _ => panic!("vec4 called with invalid arguments"),
+                        _ => panic!("vec4 called with invalid arguments {:?}", args),
                     }
                 },
             },
