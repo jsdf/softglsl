@@ -1,24 +1,50 @@
 import {useEffect, useRef} from 'react';
 import REGL from 'regl';
 
-export default function WebGLRenderer(props: {shaderSource: string}) {
-  const {shaderSource} = props;
+type Inputs = {
+  uniforms: {[key: string]: any};
+};
+
+export default function WebGLRenderer(props: {
+  fragShaderSource: string;
+  vertShaderSource: string;
+  inputs: Inputs;
+}) {
+  const {fragShaderSource, vertShaderSource, inputs} = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  console.log({inputs});
   useEffect(() => {
     if (!canvasRef.current) {
       return;
     }
-    const regl = init(canvasRef.current, shaderSource);
+    console.log({inputs});
+    const regl = init(canvasRef.current, {
+      fragShaderSource,
+      vertShaderSource,
+      inputs,
+    });
 
     return () => {
       regl.destroy();
     };
-  }, [canvasRef, shaderSource]);
+  }, [canvasRef, fragShaderSource, vertShaderSource, inputs]);
 
   return <canvas id="canvas" width="800" height="800" ref={canvasRef} />;
 }
 
-function init(canvas: HTMLCanvasElement, shaderSource: string) {
+function init(
+  canvas: HTMLCanvasElement,
+  {
+    fragShaderSource,
+    vertShaderSource,
+    inputs,
+  }: {
+    fragShaderSource: string;
+    vertShaderSource: string;
+    inputs: Inputs;
+  }
+) {
   const gl = canvas.getContext('webgl2');
   const regl = REGL({
     gl: gl as any,
@@ -31,16 +57,9 @@ function init(canvas: HTMLCanvasElement, shaderSource: string) {
 
   const drawShaderQuad = regl({
     // In a draw call, we can pass the shader source code to regl
-    frag: shaderSource,
+    frag: fragShaderSource,
 
-    vert: `#version 300 es
-    precision highp float;
-    
-    in vec2 position;
- 
-    void main () {
-      gl_Position = vec4(position, 0, 1);
-    }`,
+    vert: vertShaderSource,
 
     attributes: {
       // two triangles that form full screen quad
@@ -54,9 +73,7 @@ function init(canvas: HTMLCanvasElement, shaderSource: string) {
       ],
     },
 
-    uniforms: {
-      color: [1, 0, 0, 1],
-    },
+    uniforms: inputs.uniforms,
 
     count: 6,
   });

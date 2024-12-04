@@ -5,6 +5,7 @@ use glast::parser::ast::{
 };
 use macaw::Mat2;
 use macaw::{IVec2, IVec3, Mat3, Mat4, Vec2, Vec2Swizzles, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use serde::{Deserialize, Serialize};
 
 use core::panic;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
@@ -13,19 +14,19 @@ use crate::builtins::{self, BuiltinFn, BuiltinFns};
 
 use crate::log;
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Clone, Debug, PartialEq, Copy, Serialize, Deserialize)]
 pub struct Texture2D {
     pub id: u32,
     pub size: IVec2,
 }
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Clone, Debug, PartialEq, Copy, Serialize, Deserialize)]
 pub struct Texture3D {
     pub id: u32,
     pub size: IVec3,
 }
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Clone, Debug, PartialEq, Copy, Serialize, Deserialize)]
 pub enum Value {
     Bool(bool),
     Int(i64),
@@ -85,7 +86,7 @@ impl<T> Handle<T> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IOVar {
     pub name: String,
     pub type_: TypeTy,
@@ -202,9 +203,10 @@ pub enum Callable<'a> {
 #[derive(Clone, Debug)]
 pub struct Env {
     // the inputs and outputs of the shader
-    in_vars: Vec<IOVar>,
-    out_vars: Vec<IOVar>,
-    uniforms: Vec<IOVar>,
+    // in glsl 1.0 these are attributes and varyings for vertex and fragment shaders respectively
+    pub in_vars: Vec<IOVar>,
+    pub out_vars: Vec<IOVar>,
+    pub uniforms: Vec<IOVar>,
     functions: HashMap<String, Function>,
     builtin_functions: BuiltinFns,
 }
@@ -221,7 +223,7 @@ impl Env {
     }
 }
 
-type EnvHandle = Handle<Env>;
+pub type EnvHandle = Handle<Env>;
 
 impl EnvHandle {
     pub fn add_io_var(
@@ -306,7 +308,7 @@ fn assignment(scope: &ScopeHandle, left: &Expr, right_value: Value) -> Value {
 }
 
 pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Value {
-    log!("eval_expression {:?}", expr);
+    // log!("eval_expression {:?}", expr);
     match &expr.ty {
         ExprTy::Lit(literal) => match literal {
             Lit::Bool(b) => Value::Bool(*b),
@@ -409,7 +411,7 @@ pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Val
         }
 
         ExprTy::ObjAccess { obj, leaf } => {
-            log!("property access {:#?} {:#?}", obj, leaf);
+            // log!("property access {:#?} {:#?}", obj, leaf);
             let obj_value = eval_expression(env, scope, obj);
             let leaf_expr = leaf.as_ref().unwrap();
             let leaf_unboxed = leaf_expr.as_ref();
@@ -441,19 +443,18 @@ pub fn eval_expression(env: &EnvHandle, scope: &ScopeHandle, expr: &Expr) -> Val
                 }
             };
 
-            log!(
-                "Object access: {:?} {:?} calculated value {:#?}",
-                obj,
-                leaf,
-                leaf_value
-            );
+            // log!(
+            //     "Object access: {:?} {:?} calculated value {:#?}",
+            //     obj,
+            //     leaf,
+            //     leaf_value
+            // );
 
             leaf_value // return the value of the accessed object
         }
 
         _ => {
-            log!("tried to eval unimplemented expression type: {:#?}", expr);
-            todo!()
+            todo!("tried to eval unimplemented expression type: {:#?}", expr);
         }
     }
 }
@@ -505,16 +506,7 @@ fn declare_var(env: &EnvHandle, scope: &ScopeHandle, name: &String, type_: &Type
 
             match qualifier_type {
                 QualifierTy::In | QualifierTy::Uniform => {
-                    // check if the input variable was actually provided.
-                    // could move this to access time, but it's probably clearer to catch this statically
-                    if scope.get_var(name.as_str()) == None {
-                        panic!(
-                            "Variable '{}' is declared as an {:?} variable but not provided",
-                            name, qualifier_type
-                        );
-                    }
-
-                    // return early because we don't need to define the variable in the scope for inputs
+                    // return early for in vars because we don't need to define the variable in the scope
                     // as we expect them to be provided when initializing the execution context
                     return;
                 }
@@ -526,10 +518,10 @@ fn declare_var(env: &EnvHandle, scope: &ScopeHandle, name: &String, type_: &Type
 
     // then, define the variable in the scope
 
-    // check that there isn't already a binding for the output variable
+    // check that there isn't already a binding for the variable
     if scope.get_var(name.as_str()) == None {
-        // define a binding for the output variable
-        // this ensures that assignments to the output variable
+        // define a binding for the variable
+        // this ensures that assignments to the variable
         // will find this scope
         scope.set_var(name.clone(), Value::Nothing);
     } else {
@@ -551,7 +543,7 @@ fn initialise_var(env: &EnvHandle, scope: &ScopeHandle, name: &String, value: &O
 pub fn eval_statements(env: &EnvHandle, scope: &ScopeHandle, statements: &[Node]) -> ControlFlow {
     let at_top_level = !scope.has_parent();
     for stmt in statements {
-        log!("eval_statement {:?}", stmt);
+        // log!("eval_statement {:?}", stmt);
         match &stmt.ty {
             NodeTy::VersionDirective {
                 version: _,
@@ -665,12 +657,46 @@ pub fn eval_statements(env: &EnvHandle, scope: &ScopeHandle, statements: &[Node]
     ControlFlow::Next
 }
 
+fn validate_io_variables(env: &EnvHandle, scope: &ScopeHandle) {
+    for io_var in env.with(|env| env.in_vars.clone()) {
+        // check if the input variable was actually provided.
+        if scope.get_var(io_var.name.as_str()) == None {
+            panic!(
+                "Variable '{}' is declared as an {} variable but not provided",
+                io_var.name,
+                "in" // TODO: update the language when supporting GLSL 1.0 ES
+            );
+        }
+    }
+    for io_var in env.with(|env| env.uniforms.clone()) {
+        // check if the uniform variable was actually provided.
+        if scope.get_var(io_var.name.as_str()) == None {
+            panic!(
+                "Variable '{}' is declared as an {} variable but not provided",
+                io_var.name, "uniform"
+            );
+        }
+    }
+    for io_var in env.with(|env| env.out_vars.clone()) {
+        scope.set_var(io_var.name, Value::Nothing);
+    }
+}
+
 pub fn eval_ast(ast: &[Node], input_vars: HashMap<String, Value>) -> HashMap<String, Value> {
+    log!("Evaluating with input vars: {:#?}", input_vars);
+
     let env = EnvHandle::new(Env::new());
-    let root_scope = ScopeHandle::new(Scope::new_with_vars(None, input_vars));
+    let root_scope = ScopeHandle::new(Scope::new(None));
 
     // evaluate the AST to populate the environment and root scope
     eval_statements(&env, &root_scope, ast);
+
+    // add the input variables to the root scope
+    for (name, value) in input_vars {
+        root_scope.set_var(name, value);
+    }
+    // ensure that all required input variables are provided
+    validate_io_variables(&env, &root_scope);
 
     // call the main function
     env.call_function(&"main".to_string(), vec![], &root_scope);
@@ -691,4 +717,14 @@ pub fn eval_ast(ast: &[Node], input_vars: HashMap<String, Value>) -> HashMap<Str
 
     // return the output variables
     output_vars
+}
+
+pub fn get_env_from_ast(ast: &[Node]) -> EnvHandle {
+    let env = EnvHandle::new(Env::new());
+    let root_scope = ScopeHandle::new(Scope::new(None));
+
+    // evaluate the AST to populate the environment and root scope
+    eval_statements(&env, &root_scope, ast);
+
+    env
 }
